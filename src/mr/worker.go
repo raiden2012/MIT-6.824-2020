@@ -5,6 +5,14 @@ import "log"
 import "net/rpc"
 import "hash/fnv"
 
+import (
+	"os"
+	"io/ioutil"
+	"time"
+	"encoding/json"
+	"sort"
+)
+
 
 //
 // Map functions return a slice of KeyValue.
@@ -13,6 +21,14 @@ type KeyValue struct {
 	Key   string
 	Value string
 }
+
+type ByKey []KeyValue
+
+// for sorting by key.
+func (a ByKey) Len() int           { return len(a) }
+func (a ByKey) Swap(i, j int)      { a[i], a[j] = a[j], a[i] }
+func (a ByKey) Less(i, j int) bool { return a[i].Key < a[j].Key }
+
 
 //
 // use ihash(key) % NReduce to choose the reduce
@@ -32,28 +48,121 @@ func Worker(mapf func(string, string) []KeyValue,
 
 	// uncomment to send the Example RPC to the master.
 	// CallExample()
+	taskAck := &TaskAck{Output: make([]string,0)}
+	nextTask := &NextTask{}
+	call("Master.NextTask", taskAck, nextTask)
 
+	for {
+		fmt.Println("Worker receiving... ", taskAck, nextTask)
+		switch nextTask.Type {
+		case MAP:
+			taskAck = runMapTask(nextTask, mapf)
+		case REDUCE:
+			taskAck = runReduceTask(nextTask, reducef)
+		case EXIT:
+			os.Exit(0)
+		default:
+			time.Sleep(5*time.Second)
+		}
+		call("Master.NextTask", taskAck, nextTask)
+	}
 }
 
-//
-// example function to show how to make an RPC call to the master.
-//
-func CallExample() {
+func runMapTask(task *NextTask, mapf func(string, string) []KeyValue) *TaskAck {
+	
+	tempFiles := make([]*os.File, task.NReduce)
+	tmpfEncoders := make([]*json.Encoder, task.NReduce)
+	for i := 0; i < task.NReduce; i ++ {
+		tempFiles[i],_ = ioutil.TempFile("", "map-out")
+		tmpfEncoders[i] = json.NewEncoder(tempFiles[i])
+	}
 
-	// declare an argument structure.
-	args := ExampleArgs{}
+	for _, filename := range task.Input {
+		file, err := os.Open(filename)
+		if err != nil {
+			log.Fatalf("cannot open %v", filename)
+		}
+		content, err := ioutil.ReadAll(file)
+		if err != nil {
+			log.Fatalf("cannot read %v", filename)
+		}
+		file.Close()
+		kva := mapf(filename, string(content))
+		for _, kv := range kva {
+			i := ihash(kv.Key) % task.NReduce
+			if err := tmpfEncoders[i].Encode(&kv); err != nil {
+				return &TaskAck{}
+			}
+		}
+	}
 
-	// fill in the argument(s).
-	args.X = 99
+	taskAck := TaskAck{Name:task.Name, Type:task.Type, Output: make([]string, task.NReduce)}
+	for i := 0; i < task.NReduce; i ++ {
+		tempFiles[i].Close()
+		mapOut := fmt.Sprintf("mr-mapout/%v-%02d", task.Name, i)
 
-	// declare a reply structure.
-	reply := ExampleReply{}
+		fmt.Println("Renaming... ", tempFiles[i].Name(), mapOut)
+		os.Rename(tempFiles[i].Name(), mapOut)
+		taskAck.Output[i] = mapOut
+	}
 
-	// send the RPC request, wait for the reply.
-	call("Master.Example", &args, &reply)
+	return &taskAck
+}
 
-	// reply.Y should be 100.
-	fmt.Printf("reply.Y %v\n", reply.Y)
+func runReduceTask(task *NextTask, reducef func(string, []string) string) *TaskAck {
+	intermediate := []KeyValue{}
+	for _, filename := range task.Input {
+		file, err := os.Open(filename)
+		if err != nil {
+			log.Fatalf("cannot open %v", filename)
+		}
+		dec := json.NewDecoder(file)
+		for {
+			var kv KeyValue
+			if err := dec.Decode(&kv); err != nil {
+				break
+			}
+			intermediate = append(intermediate, kv)
+		}
+
+		if err != nil {
+			log.Fatalf("cannot read %v", filename)
+		}
+		file.Close()
+	}
+
+	sort.Sort(ByKey(intermediate))
+
+	ofile, _ := ioutil.TempFile("", "reduce-out")
+
+	//
+	// call Reduce on each distinct key in intermediate[],
+	// and print the result to mr-out-0.
+	//
+	i := 0
+	for i < len(intermediate) {
+		j := i + 1
+		for j < len(intermediate) && intermediate[j].Key == intermediate[i].Key {
+			j++
+		}
+		values := []string{}
+		for k := i; k < j; k++ {
+			values = append(values, intermediate[k].Value)
+		}
+		output := reducef(intermediate[i].Key, values)
+
+		// this is the correct format for each line of Reduce output.
+		fmt.Fprintf(ofile, "%v %v\n", intermediate[i].Key, output)
+
+		i = j
+	}
+
+	ofile.Close()
+	oName := "mr-out-" + task.Name
+	os.Rename(ofile.Name(), oName)
+
+	taskAck := TaskAck{Name: task.Name, Type: task.Type, Output: []string{oName} }
+	return &taskAck
 }
 
 //

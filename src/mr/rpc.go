@@ -9,12 +9,17 @@ package mr
 // and reply for an RPC.
 //
 
-type ExampleArgs struct {
-	X int
+type TaskAck struct {
+	Name string
+	Type TaskType
+	Output []string
 }
 
-type ExampleReply struct {
-	Y int
+type NextTask struct {
+	Name string
+	Type TaskType
+	Input []string
+	NReduce int
 }
 
 // Add your RPC definitions here.
