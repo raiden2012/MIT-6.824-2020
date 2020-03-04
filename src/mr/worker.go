@@ -48,24 +48,34 @@ func Worker(mapf func(string, string) []KeyValue,
 
 	// uncomment to send the Example RPC to the master.
 	// CallExample()
-	taskAck := &TaskAck{Output: make([]string,0)}
+	taskAck := &TaskAck{Name: "Nothing", Output: make([]string, 0)}
 	nextTask := &NextTask{}
 	call("Master.NextTask", taskAck, nextTask)
 
 	for {
-		fmt.Println("Worker receiving... ", taskAck, nextTask)
+		fmt.Println("Worker receiving ", nextTask)
 		switch nextTask.Type {
 		case MAP:
 			taskAck = runMapTask(nextTask, mapf)
 		case REDUCE:
 			taskAck = runReduceTask(nextTask, reducef)
 		case EXIT:
-			os.Exit(0)
+			// final call of exit
+			taskAck = &TaskAck{
+						Name: nextTask.Name, 
+						Type: nextTask.Type, 
+						Output: make([]string, 0)}
+			call("Master.NextTask", taskAck, nextTask)
+			return
 		default:
+			// HEARTBEAT should reset task states
+			taskAck = &TaskAck{Name: "Nothing", Output: make([]string, 0)}
 			time.Sleep(5*time.Second)
 		}
+		fmt.Println("Worker finish ", taskAck)
 		call("Master.NextTask", taskAck, nextTask)
 	}
+	
 }
 
 func runMapTask(task *NextTask, mapf func(string, string) []KeyValue) *TaskAck {
@@ -73,6 +83,11 @@ func runMapTask(task *NextTask, mapf func(string, string) []KeyValue) *TaskAck {
 	tempFiles := make([]*os.File, task.NReduce)
 	tmpfEncoders := make([]*json.Encoder, task.NReduce)
 	for i := 0; i < task.NReduce; i ++ {
+		/*
+		   We should make temp dir in same folder. Because:
+		   GoLang: os.Rename() give error "invalid cross-device link" for Docker container with Volumes.
+		   MoveFile(source, destination) will work moving file between folders
+		*/
 		tempFiles[i],_ = ioutil.TempFile("", "map-out")
 		tmpfEncoders[i] = json.NewEncoder(tempFiles[i])
 	}
@@ -99,7 +114,7 @@ func runMapTask(task *NextTask, mapf func(string, string) []KeyValue) *TaskAck {
 	taskAck := TaskAck{Name:task.Name, Type:task.Type, Output: make([]string, task.NReduce)}
 	for i := 0; i < task.NReduce; i ++ {
 		tempFiles[i].Close()
-		mapOut := fmt.Sprintf("mr-mapout/%v-%02d", task.Name, i)
+		mapOut := fmt.Sprintf("/data/mr-mapout/%v-%02d", task.Name, i)
 
 		fmt.Println("Renaming... ", tempFiles[i].Name(), mapOut)
 		os.Rename(tempFiles[i].Name(), mapOut)
@@ -133,7 +148,7 @@ func runReduceTask(task *NextTask, reducef func(string, []string) string) *TaskA
 
 	sort.Sort(ByKey(intermediate))
 
-	ofile, _ := ioutil.TempFile("", "reduce-out")
+	ofile, _ := ioutil.TempFile("./", "reduce-out")
 
 	//
 	// call Reduce on each distinct key in intermediate[],
@@ -165,6 +180,8 @@ func runReduceTask(task *NextTask, reducef func(string, []string) string) *TaskA
 	return &taskAck
 }
 
+
+
 //
 // send an RPC request to the master, wait for the response.
 // usually returns true.
@@ -172,7 +189,7 @@ func runReduceTask(task *NextTask, reducef func(string, []string) string) *TaskA
 //
 func call(rpcname string, args interface{}, reply interface{}) bool {
 	// c, err := rpc.DialHTTP("tcp", "127.0.0.1"+":1234")
-	c, err := rpc.DialHTTP("unix", "mr-socket")
+	c, err := rpc.DialHTTP("unix", "/data/mr-socket")
 	if err != nil {
 		log.Fatal("dialing:", err)
 	}

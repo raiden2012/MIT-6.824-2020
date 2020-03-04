@@ -147,19 +147,19 @@ sleep 1
 # start multiple workers
 ../mrworker ../../mrapps/crash.so &
 
-( while [ -e mr-socket -a ! -f mr-done ]
+( while [ -e /data/mr-socket -a ! -f mr-done ]
   do
     ../mrworker ../../mrapps/crash.so 
     sleep 1
   done ) &
 
-( while [ -e mr-socket -a ! -f mr-done ]
+( while [ -e /data/mr-socket -a ! -f mr-done ]
   do
     ../mrworker ../../mrapps/crash.so 
     sleep 1
   done ) &
 
-while [ -e mr-socket -a ! -f mr-done ]
+while [ -e /data/mr-socket -a ! -f mr-done ]
 do
   ../mrworker ../../mrapps/crash.so 
   sleep 1
@@ -169,7 +169,7 @@ wait
 wait
 wait
 
-rm mr-socket
+rm /data/mr-socket
 sort mr-out* > mr-crash-all
 if cmp mr-crash-all mr-correct-crash.txt
 then
